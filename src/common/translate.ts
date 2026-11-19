@@ -237,9 +237,16 @@ export async function translate(query: TranslateQuery) {
         const targetLangName = getLangName(targetLangCode)
         console.debug('sourceLang', sourceLangName)
         console.debug('targetLang', targetLangName)
+        const fromChinese = chineseLangCodes.indexOf(sourceLangCode) >= 0
         const toChinese = chineseLangCodes.indexOf(targetLangCode) >= 0
         const targetLangConfig = getLangConfig(targetLangCode)
         const sourceLangConfig = getLangConfig(sourceLangCode)
+        const sourceLangNameEn =
+            sourceLangConfig.nameEn && sourceLangConfig.nameEn !== 'Unknown' ? sourceLangConfig.nameEn : sourceLangName
+        const targetLangNameEn =
+            targetLangConfig.nameEn && targetLangConfig.nameEn !== 'Unknown' ? targetLangConfig.nameEn : targetLangName
+        const sourcePhonetic = sourceLangConfig.phoneticNotation
+        const targetPhonetic = targetLangConfig.phoneticNotation
         console.debug('Source language is', sourceLangConfig)
         rolePrompt = targetLangConfig.rolePrompt
 
@@ -271,110 +278,121 @@ export async function translate(query: TranslateQuery) {
             case 'translate':
                 commandPrompt = targetLangConfig.genCommandPrompt(sourceLangConfig)
                 contentPrompt = query.text
-                if (!query.writing && query.text.length < 5 && toChinese) {
-                    // 当用户的默认语言为中文时，查询中文词组（不超过5个字），展示多种翻译结果，并阐述适用语境。
-                    rolePrompt = codeBlock`
-                    ${oneLineTrim`
-                    你是一个翻译引擎，
-                    请将给到的文本翻译成${targetLangName}。
-                    请列出3种（如果有）最常用翻译结果：单词或短语，
-                    并列出对应的适用语境（用中文阐述）、音标或转写、词性、双语示例。
-                    按照下面格式用中文阐述：`}
-                        ${oneLineTrim`
-                        <序号><单词或短语> · /<${targetLangConfig.phoneticNotation}>/
-                        `}
-                        [<词性缩写>] <适用语境（用中文阐述）>
-                        例句：<例句>(例句翻译)
-                    `
-                    commandPrompt = ''
-                }
-                if (!query.writing && isAWord(sourceLangCode, query.text.trim())) {
-                    isWordMode = true
-                    if (toChinese) {
-                        // 单词模式，可以更详细的翻译结果，包括：音标、词性、含义、双语示例。
+                if (!query.writing) {
+                    const trimmedText = query.text.trim()
+                    if (query.selectedWord) {
+                        const phoneticInstruction = sourcePhonetic
+                            ? `Firstly, provide the corresponding phonetic notation or transcription of the word in ${sourceLangNameEn}. `
+                            : ''
+                        const phoneticLine = sourcePhonetic ? `<word> · /<${sourcePhonetic}>/` : '<word>'
                         rolePrompt = codeBlock`
-                        ${oneLineTrim`
-                        你是一个翻译引擎，请翻译给出的文本，只需要翻译不需要解释。
-                        当且仅当文本只有一个单词时，
-                        请给出单词原始形态（如果有）、
-                        单词的语种、
-                        ${targetLangConfig.phoneticNotation && '对应的音标或转写、'}
-                        所有含义（含词性）、
-                        双语示例，至少三条例句。
-                        如果你认为单词拼写错误，请提示我最可能的正确拼写，
-                        否则请严格按照下面格式给到翻译结果：
-                        `}
-                            <单词>
-                            [<语种>]· / ${targetLangConfig.phoneticNotation && `<${targetLangConfig.phoneticNotation}>`}
-                            [<词性缩写>] <中文含义>]
-                            例句：
-                            <序号><例句>(例句翻译)
-                            词源：
-                            <词源>
-                        `
-                        commandPrompt = '好的，我明白了，请给我这个单词。'
-                        contentPrompt = `单词是：${query.text}`
-                    } else {
-                        const isSameLanguage = sourceLangCode === targetLangCode
-                        rolePrompt = codeBlock`${oneLine`
-                            You are a professional translation engine.
-                            Please translate the text into ${targetLangName} without explanation.
-                            When the text has only one word,
-                            please act as a professional
-                            ${sourceLangName}-${targetLangName} dictionary,
-                            and list the original form of the word (if any),
-                            the language of the word,
-                            ${
-                                targetLangConfig.phoneticNotation &&
-                                'the corresponding phonetic notation or transcription, '
-                            }
-                            all senses with parts of speech,
-                            ${isSameLanguage ? '' : 'bilingual '}
-                            sentence examples (at least 3) and etymology.
-                            If you think there is a spelling mistake,
-                            please tell me the most possible correct word
-                            otherwise reply in the following format:
+                            ${oneLine`
+                                You are an expert in the semantic syntax of the ${sourceLangNameEn} language,
+                                and you are teaching me the ${sourceLangNameEn} language.
+                                I will give you a sentence in ${sourceLangNameEn} and a word from that sentence.
+                                ${phoneticInstruction}Then, help me explain in ${targetLangNameEn}
+                                what the word means in the sentence, what the sentence itself means,
+                                and whether the word is part of an idiom in the sentence.
+                                If it is, explain the idiom in the sentence.
+                                Provide 3 to 5 examples in ${sourceLangNameEn} with the same meaning,
+                                and explain these examples in ${targetLangNameEn}.
+                                The answer should follow the format below:
                             `}
-<word> (<original form>)
-${oneLine`
-[<language>]· /
-${targetLangConfig.phoneticNotation && `<${targetLangConfig.phoneticNotation}>`}
-`}
-${oneLine`
-[<part of speech>]
-${isSameLanguage ? '' : '<translated meaning> / '}
-<meaning in source language>
-`}
-Examples:
-<index>. <sentence>(<sentence translation>)
-Etymology:
-<etymology>`
-                        commandPrompt = 'I understand. Please give me the word.'
-                        contentPrompt = `The word is: ${query.text}`
+
+                            ${phoneticLine}
+                            <the remaining part>
+                        `
+                        commandPrompt = ''
+                        contentPrompt = `the sentence is: ${query.text}\n\nthe word is: ${query.selectedWord}`
+                    } else if (
+                        fromChinese &&
+                        !toChinese &&
+                        (trimmedText.length < 5 || isAWord(sourceLangCode, trimmedText))
+                    ) {
+                        // 当输入为中文短词或单个中文词汇且目标为非中文时，展示多个常用目标语言译文、音标、词性、中文语境说明及双语例句。
+                        const phoneticHint = targetPhonetic ? `音标或转写（${targetPhonetic}）、` : ''
+                        const phoneticFormat = targetPhonetic ? ` · /<${targetPhonetic}>/` : ''
+                        rolePrompt = codeBlock`
+                            ${oneLineTrim`
+                            你是一个翻译引擎，
+                            请将给出的${sourceLangName}文本翻译成${targetLangNameEn}。
+                            请列出 1 到 3 种最常用的${targetLangNameEn}翻译结果（单词或短语），
+                            并列出对应的${phoneticHint}词性、适用语境（用中文阐述）
+                            以及${targetLangNameEn}例句（附中文翻译）。
+                            <单词或短语>和<例句>必须使用${targetLangNameEn}，
+                            严格按照下面格式回复：`}
+                            <序号>. <${targetLangNameEn}单词或短语>${phoneticFormat}
+                            [<词性缩写>] <适用语境（用中文阐述）>
+                            例句：<${targetLangNameEn}例句>(<中文翻译>)
+                        `
+                        commandPrompt = `请将以下中文翻译成${targetLangNameEn}`
+                        contentPrompt = trimmedText
+                    } else if (!fromChinese && isAWord(sourceLangCode, trimmedText)) {
+                        isWordMode = true
+                        if (toChinese) {
+                            // 单词模式，可以更详细的翻译结果，包括：音标、词性、含义、双语示例。
+                            const phoneticDesc = sourcePhonetic ? '对应的音标或转写、' : ''
+                            const phoneticLine = sourcePhonetic ? `[<语种>] · /<${sourcePhonetic}>/` : '[<语种>]'
+                            rolePrompt = codeBlock`
+                                ${oneLineTrim`
+                                你是一个翻译引擎，请翻译给出的文本，只需要翻译不需要解释。
+                                当且仅当文本只有一个单词时，
+                                请给出单词原始形态（如果有）、
+                                单词的语种、
+                                ${phoneticDesc}
+                                所有含义（含词性）、
+                                双语示例，至少三条例句。
+                                如果你认为单词拼写错误，请提示我最可能的正确拼写，
+                                否则请严格按照下面格式给到翻译结果：
+                                `}
+                                <单词>
+                                ${phoneticLine}
+                                [<词性缩写>] <中文含义>
+                                例句：
+                                <序号>. <例句>(例句翻译)
+                                词源：
+                                <词源>
+                            `
+                            commandPrompt = ''
+                            contentPrompt = `单词是：${trimmedText}`
+                        } else {
+                            const isSameLanguage = sourceLangCode === targetLangCode
+                            const phoneticDesc = sourcePhonetic
+                                ? 'the corresponding phonetic notation or transcription, '
+                                : ''
+                            const phoneticLine = sourcePhonetic
+                                ? `[<language>] · /<${sourcePhonetic}>/`
+                                : '[<language>]'
+                            rolePrompt = codeBlock`
+                                ${oneLine`
+                                    You are a professional translation engine.
+                                    Please translate the text into ${targetLangNameEn} without explanation.
+                                    When the text has only one word,
+                                    please act as a professional
+                                    ${sourceLangNameEn}-${targetLangNameEn} dictionary,
+                                    and list the original form of the word (if any),
+                                    the language of the word,
+                                    ${phoneticDesc}all senses with parts of speech,
+                                    ${isSameLanguage ? '' : 'bilingual '}sentence examples (at least 3) and etymology.
+                                    If you think there is a spelling mistake,
+                                    please tell me the most possible correct word
+                                    otherwise reply in the following format:
+                                `}
+                                <word> (<original form>)
+                                ${phoneticLine}
+                                ${oneLine`
+                                    [<part of speech>]
+                                    ${isSameLanguage ? '' : '<translated meaning> / '}<meaning in source language>
+                                `}
+                                Examples:
+                                <index>. <sentence>(<sentence translation>)
+                                Etymology:
+                                <etymology>
+                            `
+                            commandPrompt = ''
+                            contentPrompt = `The word is: ${trimmedText}`
+                        }
                     }
-                }
-                if (!query.writing && query.selectedWord) {
-                    rolePrompt = codeBlock`
-${oneLine`
-You are an expert in the semantic syntax of the ${sourceLangName} language,
-and you are teaching me the ${sourceLangName} language.
-I will give you a sentence in ${sourceLangName} and a word from that sentence.
-${
-    sourceLangConfig.phoneticNotation &&
-    'Firstly, provide the corresponding phonetic notation or transcription of the word in ' + sourceLangName + '.'
-}
-Then, help me explain in ${targetLangName} what the word means in the sentence, what the sentence itself means,
-and whether the word is part of an idiom in the sentence. If it is, explain the idiom in the sentence.
-Provide 3 to 5 examples in ${sourceLangName} with the same meaning, and explain these examples in ${targetLangName}.
-The answer should follow the format below:
-`}
-
-${oneLine`<word> · /${sourceLangConfig.phoneticNotation && `<${sourceLangConfig.phoneticNotation}>`}/ `}
-${oneLine`<the remaining part>`}
-
-If you understand, say "yes", and then we will begin.`
-                    commandPrompt = 'Yes, I understand. Please give me the sentence and the word.'
-                    contentPrompt = `the sentence is: ${query.text}\n\nthe word is: ${query.selectedWord}`
                 }
                 break
             case 'polishing':
@@ -414,7 +432,10 @@ If you understand, say "yes", and then we will begin.`
     }
 
     if (contentPrompt) {
-        commandPrompt = `Only reply the result and nothing else. ${commandPrompt}:\n\n${contentPrompt.trimEnd()}`
+        const trimmedCommandPrompt = commandPrompt.trim()
+        commandPrompt = trimmedCommandPrompt
+            ? `Only reply the result and nothing else. ${trimmedCommandPrompt}:\n\n${contentPrompt.trimEnd()}`
+            : `Only reply the result and nothing else.\n\n${contentPrompt.trimEnd()}`
     }
     markPerf('prompt')
 
